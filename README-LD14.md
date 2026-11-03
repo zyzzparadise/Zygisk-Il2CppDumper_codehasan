@@ -50,3 +50,65 @@ Because `libil2cpp.so` is ARM64 and Houdini runs in an x86_64 host process,
 a successful build **does not guarantee** a successful in-game dump. Do not
 disable other security controls or install this on your primary emulator before
 testing in a backup/snapshot.
+
+
+## Experimental Soul Knight ARM64 TLS diagnosis (LDPlayer 14 / Houdini)
+
+This build includes an **opt-in, in-memory, version-specific** diagnostic override
+for **ChillyRoom.RPC.RPCClient**. It is **OFF by default**. It does **not**
+alter the APK or `libil2cpp.so` on disk. On Android/ARM64 it checks the original
+20-byte code signatures before changing anything. Both targets must match.
+
+The two functions and ARM64 RVAs are:
+
+| Method | ELF RVA |
+| --- | --- |
+| `RPCClient.CheckErrorCodes` | `0x991F9F8` |
+| `RPCClient.CheckCertHashTrusted` | `0x991FC98` |
+
+`RGScript.Util.SslUtil` is **not patched**, because its callback appears to
+log certificate errors before returning `true` on the inspected normal path.
+
+### Enabling for a disposable LDPlayer instance
+
+1. Back up the emulator and install the updated Zygisk module ZIP.
+2. Confirm Magisk / Zygisk is active, and restart the emulator.
+3. Run these commands from Windows CMD:
+
+```cmd
+adb shell su -c "setprop persist.il2cppdumper.package com.ChillyRoom.DungeonShooter"
+adb shell su -c "setprop persist.il2cppdumper.tls_probe 1"
+adb shell am force-stop com.ChillyRoom.DungeonShooter
+adb logcat -b all -c
+adb shell am start -n com.ChillyRoom.DungeonShooter/com.chillyroomsdk.sdkbridge.BasePlayerActivity
+```
+
+4. After launch, inspect only the module's diagnostic lines:
+
+```cmd
+adb shell su -c "logcat -b all -d -s zygisk_il2cppdumper:V" > tls-probe.log
+```
+
+A success indication is
+`TLS_PROBE: applied two RPCClient trust-check overrides (in memory)`.
+If you see `build mismatch`, `mprotect RW failed`, or another
+`TLS_PROBE` error, the override was **not verified as applied**.
+Even after success is logged, Houdini may cache translated instructions,
+and network success must still be checked independently.
+
+Disable the experiment and restart the game to restore original behavior:
+
+```cmd
+adb shell su -c "setprop persist.il2cppdumper.tls_probe 0"
+adb shell am force-stop com.ChillyRoom.DungeonShooter
+```
+
+### Security and compatibility
+
+- **Do not enable on a primary device/account.** When enabled, these
+  modifications may cause the RPC client to accept untrusted certificates.
+- This patch is specific to the analyzed ARM64 build only, not a general
+  SSL pinning bypass; a game update should safely fail the byte check.
+- It does not fix Android CA store issues, UnityWebRequest validation,
+  PCAPdroid routing problems, or unrelated TLS stacks.
+- Runtime behavior on LDPlayer 14 + Houdini has **not yet been tested**.
