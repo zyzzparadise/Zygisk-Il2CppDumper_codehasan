@@ -3,51 +3,72 @@ name: Build
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - master
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Compile and package Magisk module
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Set up Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
 
-      - name: Install Android SDK dependencies
+      - name: Install Android SDK, NDK and CMake
         shell: bash
         run: |
+          set -euo pipefail
           SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          "$SDKMANAGER" --install             "platforms;android-37"             "build-tools;36.0.0"             "ndk;28.2.13676358"             "cmake;4.1.2"
+          "${SDKMANAGER}" --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;4.1.2"
 
-      - name: Build Magisk module ZIP
+      - name: Build release module ZIP
         shell: bash
         run: |
+          set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --no-daemon --stacktrace :module:zipRelease
 
-      - name: Validate output
+      - name: Validate the Magisk ZIP
         shell: bash
         run: |
-          ls -lah out/
-          test -n "$(find out -maxdepth 1 -name '*.zip' -print -quit)"
-          unzip -l "$(find out -maxdepth 1 -name '*.zip' -print -quit)"             | grep 'zygisk/x86_64.so'
-          unzip -l "$(find out -maxdepth 1 -name '*.zip' -print -quit)"             | grep 'zygisk/arm64-v8a.so'
+          set -euo pipefail
+          shopt -s nullglob
+          zips=(out/*-release.zip)
+          if (( ${#zips[@]} != 1 )); then
+            echo "::error::Expected exactly one release ZIP in out/, found ${#zips[@]}"
+            ls -lah out/ || true
+            exit 1
+          fi
+          zipfile="${zips[0]}"
+          echo "Built: ${zipfile}"
+          unzip -t "${zipfile}" | tail -n 2
+          for abi in x86_64 arm64-v8a x86 armeabi-v7a; do
+            unzip -Z1 "${zipfile}" | grep -Fx "zygisk/${abi}.so"
+          done
+          unzip -Z1 "${zipfile}" | grep -Fx 'module.prop'
+          sha256sum "${zipfile}"
 
-      - name: Upload Magisk module
+      - name: Upload installable Magisk ZIP
         uses: actions/upload-artifact@v4
         with:
           name: Zygisk-Il2CppDumper-LD14
-          path: out/*.zip
+          path: out/*-release.zip
           if-no-files-found: error
           compression-level: 0

@@ -26,7 +26,9 @@ allprojects {
 
 ext {
     minSdk = 23
-    targetSdk = 37
+    // Android 37 is not published in the SDK manager for the Actions runner.
+    // Android 36 is sufficient: Zygisk targets Android 14 (API 34) here.
+    targetSdk = 36
 
     outDir = file("$rootDir/out")
 }
