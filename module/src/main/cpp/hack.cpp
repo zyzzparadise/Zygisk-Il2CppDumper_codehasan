@@ -16,6 +16,139 @@
 #include <sys/mman.h>
 #include <linux/unistd.h>
 #include <array>
+#include <cerrno>
+#include <cstdint>
+
+
+// Diagnostic, opt-in TLS trust probe for the exact Soul Knight ARM64 build
+// captured in SoulKnight-TLS-disasm.txt. Disabled by default.
+// It touches only ChillyRoom.RPC.RPCClient's two leaf validation methods;
+// RGScript.Util.SslUtil remains unchanged.
+#if defined(__aarch64__)
+static int MemoryProtectionFor(uintptr_t addr) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        LOGE("TLS_PROBE: cannot open /proc/self/maps (errno=%d)", errno);
+        return -1;
+    }
+
+    char line[1024];
+    int protection = -1;
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long long begin = 0, end = 0;
+        char perms[5] = {};
+        if (sscanf(line, "%llx-%llx %4s", &begin, &end, perms) != 3) continue;
+        if (addr < begin || addr >= end) continue;
+        protection = 0;
+        if (perms[0] == 'r') protection |= PROT_READ;
+        if (perms[1] == 'w') protection |= PROT_WRITE;
+        if (perms[2] == 'x') protection |= PROT_EXEC;
+        break;
+    }
+    fclose(maps);
+    return protection;
+}
+
+static void MaybeEnableSoulKnightTlsProbe(void *handle) {
+    char setting[PROP_VALUE_MAX] = {};
+    __system_property_get("persist.il2cppdumper.tls_probe", setting);
+    if (strcmp(setting, "1") != 0) return;
+
+    char package[PROP_VALUE_MAX] = {};
+    __system_property_get("persist.il2cppdumper.package", package);
+    if (strcmp(package, "com.ChillyRoom.DungeonShooter") != 0) {
+        LOGE("TLS_PROBE: blocked (target package property mismatch: %s)", package);
+        return;
+    }
+
+    xdl_info_t info{};
+    if (xdl_info(handle, XDL_DI_DLINFO, &info) != 0 || !info.dli_fbase) {
+        LOGE("TLS_PROBE: xdl_info failed");
+        return;
+    }
+    if (!info.dli_fname || !strstr(info.dli_fname, "com.ChillyRoom.DungeonShooter")) {
+        LOGE("TLS_PROBE: unexpected library path: %s",
+             info.dli_fname ? info.dli_fname : "(null)");
+        return;
+    }
+
+    // ELF virtual addresses from the ARM64 dump, NOT on-disk offsets.
+    static constexpr uintptr_t kErrorCodesRva = 0x0991f9f8;
+    static constexpr uintptr_t kHashTrustedRva = 0x0991fc98;
+    // Check 20 bytes to avoid silently changing another game/IL2CPP build.
+    static constexpr unsigned char kErrorCodesStart[] = {
+        0xfe, 0x6f, 0xbb, 0xa9, 0xfa, 0x67, 0x01, 0xa9,
+        0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9,
+        0xf4, 0x4f, 0x04, 0xa9
+    };
+    static constexpr unsigned char kHashTrustedStart[] = {
+        0xfe, 0x0f, 0x1b, 0xf8, 0xfa, 0x67, 0x01, 0xa9,
+        0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9,
+        0xf4, 0x4f, 0x04, 0xa9
+    };
+    // AArch64: mov w0, #1 ; ret. No stack adjustment.
+    static constexpr unsigned char kReturnTrue[] = {
+        0x20, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6
+    };
+
+    const uintptr_t bias = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    const uintptr_t errorAddress = bias + kErrorCodesRva;
+    const uintptr_t hashAddress = bias + kHashTrustedRva;
+    LOGI("TLS_PROBE: lib base=%p error=%p hash=%p",
+         info.dli_fbase, reinterpret_cast<void *>(errorAddress),
+         reinterpret_cast<void *>(hashAddress));
+
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0 || (pageSize & (pageSize - 1)) != 0) {
+        LOGE("TLS_PROBE: invalid page size: %ld", pageSize);
+        return;
+    }
+    const uintptr_t mask = static_cast<uintptr_t>(pageSize - 1);
+    const uintptr_t errorPage = errorAddress & ~mask;
+    const uintptr_t hashPage = hashAddress & ~mask;
+    if (errorPage != hashPage) {
+        LOGE("TLS_PROBE: targets on different pages (unsupported)");
+        return;
+    }
+
+    const int originalProtection = MemoryProtectionFor(errorAddress);
+    if (originalProtection < 0 ||
+        MemoryProtectionFor(hashAddress) != originalProtection) {
+        LOGE("TLS_PROBE: map permission lookup failed or mismatched");
+        return;
+    }
+    if (!(originalProtection & PROT_READ)) {
+        LOGE("TLS_PROBE: code mapping is not readable");
+        return;
+    }
+    if (memcmp(reinterpret_cast<const void *>(errorAddress),
+               kErrorCodesStart, sizeof(kErrorCodesStart)) != 0 ||
+        memcmp(reinterpret_cast<const void *>(hashAddress),
+               kHashTrustedStart, sizeof(kHashTrustedStart)) != 0) {
+        LOGE("TLS_PROBE: build mismatch, byte signatures rejected. No changes.");
+        return;
+    }
+
+    void *page = reinterpret_cast<void *>(errorPage);
+    if (mprotect(page, static_cast<size_t>(pageSize), PROT_READ | PROT_WRITE) != 0) {
+        LOGE("TLS_PROBE: mprotect RW failed (errno=%d)", errno);
+        return;
+    }
+
+    memcpy(reinterpret_cast<void *>(errorAddress), kReturnTrue, sizeof(kReturnTrue));
+    memcpy(reinterpret_cast<void *>(hashAddress), kReturnTrue, sizeof(kReturnTrue));
+    __builtin___clear_cache(reinterpret_cast<char *>(errorAddress),
+                            reinterpret_cast<char *>(errorAddress + sizeof(kReturnTrue)));
+    __builtin___clear_cache(reinterpret_cast<char *>(hashAddress),
+                            reinterpret_cast<char *>(hashAddress + sizeof(kReturnTrue)));
+
+    if (mprotect(page, static_cast<size_t>(pageSize), originalProtection) != 0) {
+        LOGE("TLS_PROBE: WARNING: cannot restore original protections (errno=%d)", errno);
+        return;
+    }
+    LOGI("TLS_PROBE: applied two RPCClient trust-check overrides (in memory)");
+}
+#endif
 
 void hack_start(const char *game_data_dir) {
     bool load = false;
@@ -23,6 +156,9 @@ void hack_start(const char *game_data_dir) {
         void *handle = xdl_open("libil2cpp.so", 0);
         if (handle) {
             load = true;
+#if defined(__aarch64__)
+            MaybeEnableSoulKnightTlsProbe(handle);
+#endif
             il2cpp_api_init(handle);
             il2cpp_dump(game_data_dir);
             break;
