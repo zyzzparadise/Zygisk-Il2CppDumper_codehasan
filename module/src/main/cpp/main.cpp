@@ -20,6 +20,10 @@ public:
     void onLoad(Api *api, JNIEnv *env) override {
         this->api = api;
         this->env = env;
+        if (env->GetJavaVM(&java_vm) != JNI_OK) {
+            LOGE("GetJavaVM from Zygisk failed");
+            java_vm = nullptr;
+        }
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
@@ -32,7 +36,12 @@ public:
 
     void postAppSpecialize(const AppSpecializeArgs *) override {
         if (enable_hack) {
-            std::thread hack_thread(hack_prepare, game_data_dir, data, length);
+            if (!java_vm) {
+                LOGE("No JavaVM available; skipping dumper");
+                return;
+            }
+            std::thread hack_thread(
+                    hack_prepare, game_data_dir, data, length, java_vm);
             hack_thread.detach();
         }
     }
@@ -40,6 +49,7 @@ public:
 private:
     Api *api{};
     JNIEnv *env{};
+    JavaVM *java_vm{};
     bool enable_hack{};
     char *game_data_dir{};
     void *data{};

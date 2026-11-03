@@ -4,5 +4,4 @@ version=${version}
 versionCode=${versionCode}
 author=${author}
 description=${description}
-updateJson=https://raw.githubusercontent.com/codehasan/Zygisk-Il2CppDumper/master/update.json
 action=action.sh

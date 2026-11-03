@@ -115,66 +115,69 @@ struct NativeBridgeCallbacks {
     void *(*loadLibraryExt)(const char *libpath, int flag, void *ns);
 };
 
-// Poll (bounded) until a JavaVM exists and ActivityThread.currentApplication() is non-null,
-// signalling the native bridge (houdini) is up. Replaces a fixed sleep. Returns the VM, or
-// nullptr on timeout.
-static JavaVM *WaitForRuntime(void *libart) {
-    auto JNI_GetCreatedJavaVMs = (jint (*)(JavaVM **, jsize, jsize *)) dlsym(
-            libart, "JNI_GetCreatedJavaVMs");
-    LOGI("JNI_GetCreatedJavaVMs %p", JNI_GetCreatedJavaVMs);
-    if (!JNI_GetCreatedJavaVMs) {
-        LOGE("dlsym JNI_GetCreatedJavaVMs failed");
-        return nullptr;
-    }
-    for (int i = 0; i < 300; i++) { // up to ~30s at 100ms per iteration
-        JavaVM *vms_buf[1];
-        jsize num_vms = 0;
-        if (JNI_GetCreatedJavaVMs(vms_buf, 1, &num_vms) == JNI_OK && num_vms > 0) {
-            JavaVM *vms = vms_buf[0];
-            JNIEnv *env = nullptr;
-            if (vms->AttachCurrentThread(&env, nullptr) == JNI_OK && env != nullptr) {
-                bool ready = false;
-                jclass activity_thread_clz = env->FindClass("android/app/ActivityThread");
-                if (activity_thread_clz != nullptr) {
-                    jmethodID currentApplicationId = env->GetStaticMethodID(
-                            activity_thread_clz, "currentApplication",
-                            "()Landroid/app/Application;");
-                    if (currentApplicationId) {
-                        jobject application = env->CallStaticObjectMethod(
-                                activity_thread_clz, currentApplicationId);
-                        if (application != nullptr) {
-                            ready = true;
-                            env->DeleteLocalRef(application);
-                        }
-                    }
-                    env->DeleteLocalRef(activity_thread_clz);
-                }
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                }
-                if (ready) {
-                    return vms;
-                }
-            }
-        }
-        usleep(100 * 1000);
-    }
-    LOGE("timed out waiting for runtime/application");
-    return nullptr;
-}
-
-bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size_t length) {
-    auto libart = dlopen("libart.so", RTLD_NOW);
-    if (!libart) {
-        LOGE("dlopen libart.so failed");
+// Wait for the Android application using the JavaVM supplied by Zygisk.
+// No dlopen("libart.so") or JNI_GetCreatedJavaVMs is required.
+static bool WaitForRuntime(JavaVM *vm) {
+    if (!vm) {
+        LOGE("WaitForRuntime: JavaVM is null");
         return false;
     }
-    JavaVM *vms = WaitForRuntime(libart);
-    if (!vms) {
+
+    JNIEnv *env = nullptr;
+    if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        LOGE("AttachCurrentThread failed");
+        return false;
+    }
+
+    for (int i = 0; i < 300; ++i) {
+        bool ready = false;
+
+        jclass cls = env->FindClass("android/app/ActivityThread");
+        if (cls) {
+            jmethodID method = env->GetStaticMethodID(
+                    cls,
+                    "currentApplication",
+                    "()Landroid/app/Application;");
+
+            if (method) {
+                jobject app = env->CallStaticObjectMethod(cls, method);
+                if (app && !env->ExceptionCheck()) {
+                    ready = true;
+                }
+                if (app) {
+                    env->DeleteLocalRef(app);
+                }
+            }
+            env->DeleteLocalRef(cls);
+        }
+
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+
+        if (ready) {
+            LOGI("JavaVM and Application ready");
+            return true;
+        }
+
+        usleep(100 * 1000);
+    }
+
+    LOGE("Timed out waiting for Application");
+    return false;
+}
+
+bool NativeBridgeLoad(
+        const char *game_data_dir,
+        int api_level,
+        void *data,
+        size_t length,
+        JavaVM *vm) {
+    JavaVM *vms = vm;
+    if (!WaitForRuntime(vms)) {
         LOGE("runtime/application not ready");
         return false;
     }
-
     auto lib_dir = GetLibDir(vms);
     if (lib_dir.empty()) {
         LOGE("GetLibDir error");
@@ -191,6 +194,9 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
         auto native_bridge = GetNativeBridgeLibrary();
         LOGI("native bridge: %s", native_bridge.data());
         nb = dlopen(native_bridge.data(), RTLD_NOW);
+    }
+    if (!nb) {
+        LOGE("NativeBridge dlopen failed: %s", dlerror());
     }
     if (nb) {
         LOGI("nb %p", nb);
@@ -238,6 +244,11 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
                                                                                   "JNI_OnLoad",
                                                                                   nullptr, 0);
                 LOGI("JNI_OnLoad %p", init);
+                if (!init) {
+                    LOGE("NativeBridge JNI_OnLoad trampoline missing");
+                    close(fd);
+                    return false;
+                }
                 init(vms, (void *) game_data_dir);
                 return true;
             }
@@ -247,13 +258,17 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
     return false;
 }
 
-void hack_prepare(const char *game_data_dir, void *data, size_t length) {
+void hack_prepare(
+        const char *game_data_dir,
+        void *data,
+        size_t length,
+        JavaVM *vm) {
     LOGI("hack thread: %d", gettid());
     int api_level = android_get_device_api_level();
     LOGI("api level: %d", api_level);
 
 #if defined(__i386__) || defined(__x86_64__)
-    if (!NativeBridgeLoad(game_data_dir, api_level, data, length)) {
+    if (!NativeBridgeLoad(game_data_dir, api_level, data, length, vm)) {
 #endif
         hack_start(game_data_dir);
 #if defined(__i386__) || defined(__x86_64__)

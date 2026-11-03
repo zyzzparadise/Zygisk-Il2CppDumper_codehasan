@@ -1,7 +1,5 @@
 <div align="center">
 
-![banner](https://raw.githubusercontent.com/codehasan/Zygisk-Il2CppDumper/master/images/banner.webp)
-
 # Zygisk‑Il2CppDumper
 
 **Dump Il2Cpp metadata from a running game — past encryption, obfuscation, and packing.**
@@ -13,19 +11,23 @@
 
 </div>
 
+---
+
 ## Features
 
-**Original:** Runtime Il2Cpp metadata dumping to `dump.cs` on arm64/armeabi-v7a (and x86/x86_64 via houdini).
+From the original: runtime dumping of Il2Cpp metadata to a readable `dump.cs`, on arm64/armeabi‑v7a (and x86_64/x86 via houdini).
 
-**This fork adds:**
+This fork adds:
 
-- 🔧 **Dynamic target switching** — Change games via `persist.il2cppdumper.package` without rebuilding the module.
-- 🔢 **Const value dumping** — Extracts actual literal values for all primitives and strings, not just enums.
-- 🌊 **Streaming output** — Incremental writes for a low memory footprint on large games.
-- ⏱️ **Runtime polling** — Dynamically waits for the runtime instead of a fixed delay, fixing early-load failures.
-- 🛡️ **Hardened native path** — Fragile syscalls fail gracefully instead of crashing.
-- 🖥️ **WebUI** — Switch targets directly via KernelSU/APatch without ADB or shell.
-- 🖲️ **Root-manager integration** — Action button to view/set targets, with a seeded boot default.
+- 🔧 **Switch targets without rebuilding** — the game package is read at runtime from a system property (`persist.il2cppdumper.package`); point it at any game and restart.
+- 🔢 **Const value dumping** — literal fields emit their real values for every primitive and `string`, not just enums.
+- 🌊 **Streaming output** — the dump is written incrementally, so large games dump with a small memory footprint.
+- ⏱️ **Runtime‑readiness polling** — replaces a fixed `sleep(5)` with bounded polling until the runtime is actually ready, fixing early‑load failures.
+- 🛡️ **Hardened native path** — fragile syscalls are checked and fail gracefully instead of crashing.
+- 🖥️ **WebUI for fast target switching** — set the target package from a simple page in KernelSU/APatch, no ADB or shell needed; shows the current target live.
+- 🖲️ **Root‑manager action button** — shows and helps set the current target; a boot service seeds a default.
+
+---
 
 ## Requirements
 
@@ -36,6 +38,8 @@
 
 > [!IMPORTANT]
 > **Game crashes on launch?** It likely detects root. Turn **Enforce DenyList OFF**, install [**Shamiko**](https://github.com/LSPosed/LSPosed.github.io/releases), and add the game to the DenyList — this hides root while keeping the module loaded.
+
+---
 
 ## Usage
 
@@ -72,6 +76,9 @@ Start the game and let it finish loading. The dump is written to:
 > ```bash
 > setprop persist.il2cppdumper.package com.new.game
 > ```
+> You can also confirm the current target from the module's **action** button in your root manager.
+
+---
 
 ## Building from source
 
@@ -79,6 +86,8 @@ Start the game and let it finish loading. The dump is written to:
 2. In Android Studio, run the Gradle task `:module:assembleRelease`.
 3. The flashable zip is produced in the `out/` folder.
 4. Flash it in your root manager and reboot.
+
+---
 
 ## Credits
 
