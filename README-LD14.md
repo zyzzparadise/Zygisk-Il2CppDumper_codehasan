@@ -112,3 +112,39 @@ adb shell am force-stop com.ChillyRoom.DungeonShooter
 - It does not fix Android CA store issues, UnityWebRequest validation,
   PCAPdroid routing problems, or unrelated TLS stacks.
 - Runtime behavior on LDPlayer 14 + Houdini has **not yet been tested**.
+
+
+## LD14.3 diagnostics when Logcat is empty
+
+If no lines with tag `zygisk_il2cppdumper` appear, the ARM64 worker now
+writes an independent diagnostic file:
+
+`/data/user/0/com.ChillyRoom.DungeonShooter/files/tls-probe-status.txt`
+
+This status file is **overwritten when the ARM64 worker starts**, and
+updated as each TLS-probe stage executes. It records whether
+`persist.il2cppdumper.tls_probe` and
+`persist.il2cppdumper.package` were readable in the translated ARM64 process,
+plus detailed reasons for refusing to patch. It does not log certificates,
+HTTP traffic, or secrets.
+
+After installing the LD14.3 release ZIP, reboot the emulator and run:
+
+```cmd
+adb shell su -c "setprop persist.il2cppdumper.package com.ChillyRoom.DungeonShooter"
+adb shell su -c "setprop persist.il2cppdumper.tls_probe 1"
+adb shell am force-stop com.ChillyRoom.DungeonShooter
+adb shell am start -n com.ChillyRoom.DungeonShooter/com.chillyroomsdk.sdkbridge.BasePlayerActivity
+```
+
+Wait for the main menu, then:
+
+```cmd
+adb shell su -c "cat /data/user/0/com.ChillyRoom.DungeonShooter/files/tls-probe-status.txt"
+adb shell su -c "stat /data/user/0/com.ChillyRoom.DungeonShooter/files/dump.cs"
+```
+
+If the status file is absent despite a fresh dump, the ARM worker may not
+have started or a different build of the module is running.
+If the status file reports `read_count=0`, investigate the property view
+inside the Houdini NativeBridge rather than changing the ELF RVA.
