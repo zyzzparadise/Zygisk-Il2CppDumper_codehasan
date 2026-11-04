@@ -20,6 +20,23 @@
 #include <cstdint>
 
 
+#if defined(__aarch64__)
+static char g_tls_probe_status_path[1024] = {};
+
+static void TlsProbeStatus(const char *stage, const char *detail = "") {
+    LOGI("TLS_PROBE: %s %s", stage, detail);
+    if (!g_tls_probe_status_path[0]) return;
+    FILE *f = fopen(g_tls_probe_status_path, "a");
+    if (!f) {
+        LOGE("TLS_PROBE: cannot write status file (errno=%d)", errno);
+        return;
+    }
+    fprintf(f, "pid=%ld  %s  %s\n",
+            static_cast<long>(getpid()), stage, detail);
+    fclose(f);
+}
+#endif
+
 // Diagnostic, opt-in TLS trust probe for the exact Soul Knight ARM64 build
 // captured in SoulKnight-TLS-disasm.txt. Disabled by default.
 // It touches only ChillyRoom.RPC.RPCClient's two leaf validation methods;
@@ -50,23 +67,38 @@ static int MemoryProtectionFor(uintptr_t addr) {
 }
 
 static void MaybeEnableSoulKnightTlsProbe(void *handle) {
+    TlsProbeStatus("entered opt-in TLS probe");
     char setting[PROP_VALUE_MAX] = {};
-    __system_property_get("persist.il2cppdumper.tls_probe", setting);
-    if (strcmp(setting, "1") != 0) return;
+    const int settingLength = __system_property_get("persist.il2cppdumper.tls_probe", setting);
+    char propertyInfo[160] = {};
+    snprintf(propertyInfo, sizeof(propertyInfo), "read_count=%d, value='%s'",
+             settingLength, setting);
+    TlsProbeStatus("flag", propertyInfo);
+    if (strcmp(setting, "1") != 0) {
+        TlsProbeStatus("disabled: ARM64 property is not 1");
+        return;
+    }
 
     char package[PROP_VALUE_MAX] = {};
-    __system_property_get("persist.il2cppdumper.package", package);
+    const int packageLength = __system_property_get("persist.il2cppdumper.package", package);
+    snprintf(propertyInfo, sizeof(propertyInfo), "read_count=%d, value='%s'",
+             packageLength, package);
+    TlsProbeStatus("package", propertyInfo);
     if (strcmp(package, "com.ChillyRoom.DungeonShooter") != 0) {
+        TlsProbeStatus("blocked: ARM64 package property mismatch");
         LOGE("TLS_PROBE: blocked (target package property mismatch: %s)", package);
         return;
     }
 
     xdl_info_t info{};
     if (xdl_info(handle, XDL_DI_DLINFO, &info) != 0 || !info.dli_fbase) {
+        TlsProbeStatus("blocked: xdl_info failed");
         LOGE("TLS_PROBE: xdl_info failed");
         return;
     }
+    TlsProbeStatus("library", info.dli_fname ? info.dli_fname : "(unknown)");
     if (!info.dli_fname || !strstr(info.dli_fname, "com.ChillyRoom.DungeonShooter")) {
+        TlsProbeStatus("blocked: wrong library path");
         LOGE("TLS_PROBE: unexpected library path: %s",
              info.dli_fname ? info.dli_fname : "(null)");
         return;
@@ -97,9 +129,11 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
     LOGI("TLS_PROBE: lib base=%p error=%p hash=%p",
          info.dli_fbase, reinterpret_cast<void *>(errorAddress),
          reinterpret_cast<void *>(hashAddress));
+    TlsProbeStatus("resolved target addresses");
 
     const long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0 || (pageSize & (pageSize - 1)) != 0) {
+        TlsProbeStatus("blocked: invalid page size");
         LOGE("TLS_PROBE: invalid page size: %ld", pageSize);
         return;
     }
@@ -107,6 +141,7 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
     const uintptr_t errorPage = errorAddress & ~mask;
     const uintptr_t hashPage = hashAddress & ~mask;
     if (errorPage != hashPage) {
+        TlsProbeStatus("blocked: target addresses on different pages");
         LOGE("TLS_PROBE: targets on different pages (unsupported)");
         return;
     }
@@ -114,10 +149,12 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
     const int originalProtection = MemoryProtectionFor(errorAddress);
     if (originalProtection < 0 ||
         MemoryProtectionFor(hashAddress) != originalProtection) {
+        TlsProbeStatus("blocked: map permission check failed");
         LOGE("TLS_PROBE: map permission lookup failed or mismatched");
         return;
     }
     if (!(originalProtection & PROT_READ)) {
+        TlsProbeStatus("blocked: mapping not readable");
         LOGE("TLS_PROBE: code mapping is not readable");
         return;
     }
@@ -125,12 +162,14 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
                kErrorCodesStart, sizeof(kErrorCodesStart)) != 0 ||
         memcmp(reinterpret_cast<const void *>(hashAddress),
                kHashTrustedStart, sizeof(kHashTrustedStart)) != 0) {
+        TlsProbeStatus("blocked: build signature mismatch, no changes");
         LOGE("TLS_PROBE: build mismatch, byte signatures rejected. No changes.");
         return;
     }
 
     void *page = reinterpret_cast<void *>(errorPage);
     if (mprotect(page, static_cast<size_t>(pageSize), PROT_READ | PROT_WRITE) != 0) {
+        TlsProbeStatus("blocked: mprotect RW failed");
         LOGE("TLS_PROBE: mprotect RW failed (errno=%d)", errno);
         return;
     }
@@ -143,20 +182,36 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
                             reinterpret_cast<char *>(hashAddress + sizeof(kReturnTrue)));
 
     if (mprotect(page, static_cast<size_t>(pageSize), originalProtection) != 0) {
+        TlsProbeStatus("WARNING: cannot restore original page protections");
         LOGE("TLS_PROBE: WARNING: cannot restore original protections (errno=%d)", errno);
         return;
     }
+    TlsProbeStatus("applied two RPCClient trust-check overrides (in memory)");
     LOGI("TLS_PROBE: applied two RPCClient trust-check overrides (in memory)");
 }
 #endif
 
 void hack_start(const char *game_data_dir) {
+#if defined(__aarch64__)
+    snprintf(g_tls_probe_status_path, sizeof(g_tls_probe_status_path),
+             "%s/files/tls-probe-status.txt", game_data_dir);
+    FILE *initialStatus = fopen(g_tls_probe_status_path, "w");
+    if (initialStatus) {
+        fprintf(initialStatus, "ARM64 component entered hack_start, pid=%ld\n",
+                static_cast<long>(getpid()));
+        fclose(initialStatus);
+    } else {
+        LOGE("TLS_PROBE: initial status file failed, errno=%d", errno);
+    }
+    TlsProbeStatus("ARM64 hack_start started");
+#endif
     bool load = false;
     for (int i = 0; i < 10; i++) {
         void *handle = xdl_open("libil2cpp.so", 0);
         if (handle) {
             load = true;
 #if defined(__aarch64__)
+            TlsProbeStatus("libil2cpp.so found");
             MaybeEnableSoulKnightTlsProbe(handle);
 #endif
             il2cpp_api_init(handle);
@@ -167,6 +222,9 @@ void hack_start(const char *game_data_dir) {
         }
     }
     if (!load) {
+#if defined(__aarch64__)
+        TlsProbeStatus("ERROR: libil2cpp.so not found");
+#endif
         LOGI("libil2cpp.so not found in thread %d", gettid());
     }
 }
