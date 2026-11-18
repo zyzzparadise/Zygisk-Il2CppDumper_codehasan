@@ -276,7 +276,8 @@ static void MaybeEnableSoulKnightX64TlsProbe(void *handle, const char *dir) {
     const int firstPerms = X64MappingProtection(error);
     const int secondPerms = X64MappingProtection(hash);
 
-    if ((firstPerms & (PROT_READ | PROT_EXEC)) != (PROT_READ | PROT_EXEC) ||
+    if (firstPerms < 0 || secondPerms < 0 ||
+        (firstPerms & (PROT_READ | PROT_EXEC)) != (PROT_READ | PROT_EXEC) ||
         (secondPerms & (PROT_READ | PROT_EXEC)) != (PROT_READ | PROT_EXEC) ||
         (firstPage == secondPage && firstPerms != secondPerms) ||
         (error & mask) + sizeof(errorSignature) > pageSize ||
