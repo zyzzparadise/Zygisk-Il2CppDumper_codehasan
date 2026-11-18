@@ -5,6 +5,7 @@
 #include "hack.h"
 #include "il2cpp_dump.h"
 #include "log.h"
+#include "dumper_trace.h"
 #include "xdl.h"
 #include <cstring>
 #include <cstdio>
@@ -192,6 +193,13 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
 #endif
 
 void hack_start(const char *game_data_dir) {
+#if defined(__x86_64__)
+    DumperTrace(game_data_dir, "hack_start entered (x86_64 native worker)");
+#elif defined(__i386__)
+    DumperTrace(game_data_dir, "hack_start entered (x86 native worker)");
+#elif defined(__aarch64__)
+    DumperTrace(game_data_dir, "hack_start entered (arm64 translated worker)");
+#endif
 #if defined(__aarch64__)
     snprintf(g_tls_probe_status_path, sizeof(g_tls_probe_status_path),
              "%s/files/tls-probe-status.txt", game_data_dir);
@@ -210,18 +218,33 @@ void hack_start(const char *game_data_dir) {
         void *handle = xdl_open("libil2cpp.so", 0);
         if (handle) {
             load = true;
+            xdl_info_t dumper_info{};
+            if (xdl_info(handle, XDL_DI_DLINFO, &dumper_info) == 0) {
+                DumperTrace(game_data_dir, "libil2cpp.so opened at %p, path=%s",
+                            dumper_info.dli_fbase,
+                            dumper_info.dli_fname ? dumper_info.dli_fname : "(unavailable)");
+            } else {
+                DumperTrace(game_data_dir, "libil2cpp.so opened, xdl_info unavailable");
+            }
 #if defined(__aarch64__)
             TlsProbeStatus("libil2cpp.so found");
             MaybeEnableSoulKnightTlsProbe(handle);
 #endif
+            DumperTrace(game_data_dir, "il2cpp_api_init starting");
             il2cpp_api_init(handle);
+            DumperTrace(game_data_dir, "il2cpp_api_init finished; starting dump");
             il2cpp_dump(game_data_dir);
+            DumperTrace(game_data_dir, "il2cpp_dump returned");
             break;
         } else {
+            if (i == 0 || i == 9) {
+                DumperTrace(game_data_dir, "libil2cpp.so not open yet (attempt %d/10)", i + 1);
+            }
             sleep(1);
         }
     }
     if (!load) {
+        DumperTrace(game_data_dir, "ERROR: libil2cpp.so not found after 10 attempts");
 #if defined(__aarch64__)
         TlsProbeStatus("ERROR: libil2cpp.so not found");
 #endif
@@ -373,16 +396,25 @@ bool NativeBridgeLoad(
         return false;
     }
     auto lib_dir = GetLibDir(vms);
+    DumperTrace(game_data_dir, "nativeLibraryDir=%s",
+                lib_dir.empty() ? "(unavailable)" : lib_dir.c_str());
     if (lib_dir.empty()) {
         LOGE("GetLibDir error");
         return false;
     }
     if (lib_dir.find("/lib/x86") != std::string::npos) {
         LOGI("no need NativeBridge");
-        munmap(data, length);
+        DumperTrace(game_data_dir, "native x86 library selected; using direct x86 dumper");
+        if (data && length) munmap(data, length);
         return false;
     }
 
+    if (!data || !length) {
+        DumperTrace(game_data_dir, "NativeBridge ARM payload unavailable; fallback to direct dump");
+        LOGW("NativeBridge ARM payload unavailable");
+        return false;
+    }
+    DumperTrace(game_data_dir, "ARM-only library path; starting Houdini NativeBridge");
     auto nb = dlopen("libhoudini.so", RTLD_NOW);
     if (!nb) {
         auto native_bridge = GetNativeBridgeLibrary();
@@ -458,11 +490,14 @@ void hack_prepare(
         size_t length,
         JavaVM *vm) {
     LOGI("hack thread: %d", gettid());
+    DumperTrace(game_data_dir, "hack_prepare entered, tid=%ld", static_cast<long>(gettid()));
     int api_level = android_get_device_api_level();
     LOGI("api level: %d", api_level);
+    DumperTrace(game_data_dir, "Android API level=%d", api_level);
 
 #if defined(__i386__) || defined(__x86_64__)
     if (!NativeBridgeLoad(game_data_dir, api_level, data, length, vm)) {
+        DumperTrace(game_data_dir, "NativeBridge not used; trying current-ABI dumper");
 #endif
         hack_start(game_data_dir);
 #if defined(__i386__) || defined(__x86_64__)
