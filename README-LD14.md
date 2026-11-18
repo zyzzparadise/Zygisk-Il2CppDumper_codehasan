@@ -148,3 +148,47 @@ If the status file is absent despite a fresh dump, the ARM worker may not
 have started or a different build of the module is running.
 If the status file reports `read_count=0`, investigate the property view
 inside the Houdini NativeBridge rather than changing the ELF RVA.
+
+
+## LD14.4: Soul Knight 8.8.0.5 native x86_64 diagnostics
+
+Soul Knight 8.8.0.5 was observed loading the **native x86_64**
+`libil2cpp.so` from the app's `lib/x86_64/` directory, unlike the
+previous ARM64-over-Houdini build.
+
+The historical in-memory TLS override is **ARM64-only** and cannot be used
+on x86_64. Keep `persist.il2cppdumper.tls_probe=0` while diagnosing the
+new game's native dumper.
+
+This build adds `dumper-status.txt`, independent of Android Logcat, to
+**all worker architectures**. It records Zygisk specialization, library
+selection, `xdl_open`, IL2CPP API initialization, and the major
+success/failure conditions in `il2cpp_dump`. It contains no network
+traffic, app content, or credentials. It also allows direct-ABI dumping
+when the ARM helper .so cannot be opened.
+
+After installing and rebooting LDPlayer:
+
+```cmd
+adb shell su -c "setprop persist.il2cppdumper.package com.ChillyRoom.DungeonShooter"
+adb shell su -c "setprop persist.il2cppdumper.tls_probe 0"
+adb shell am force-stop com.ChillyRoom.DungeonShooter
+adb shell am start -n com.ChillyRoom.DungeonShooter/com.chillyroomsdk.sdkbridge.BasePlayerActivity
+```
+
+After the game reaches its menu (or after roughly 2 minutes if it does not):
+
+```cmd
+adb shell su -c "cat /data/user/0/com.ChillyRoom.DungeonShooter/files/dumper-status.txt"
+adb shell su -c "ls -lh /data/user/0/com.ChillyRoom.DungeonShooter/files/dump.cs"
+```
+
+`dumper-status.txt` reports the PID on each line, so any stale log lines
+can be distinguished from the latest game process. If the file is absent
+entirely, investigate whether Zygisk specializes this package, rather than
+assuming IL2CPP metadata is broken.
+
+**Do not re-enable the ARM64 certificate override on this x86_64 version.**
+A new native x86_64 disassembly and an independent verification of its
+certificate-validation logic would be required for a new version-specific
+experiment. The module has not been runtime-tested on Soul Knight 8.8.0.5.
