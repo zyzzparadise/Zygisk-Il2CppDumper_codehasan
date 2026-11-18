@@ -192,3 +192,57 @@ assuming IL2CPP metadata is broken.
 A new native x86_64 disassembly and an independent verification of its
 certificate-validation logic would be required for a new version-specific
 experiment. The module has not been runtime-tested on Soul Knight 8.8.0.5.
+
+
+## LD14.5: Experimental native x86_64 TLS probe for Soul Knight 8.8.0.5
+
+The game now ships a native x86_64 `libil2cpp.so` on the reported LDPlayer
+instance. Its SHA-256 from the user-supplied static extraction report is:
+`5d6d44d69d62b85984c1fd3f80e81b707ef6efc9152ca8610674820a949d097c`.
+
+An **opt-in, in-memory, x86_64-only** trust-check override was added for:
+- `ChillyRoom.RPC.RPCClient.g__CheckErrorCodes|10_1` at RVA `0xA0E56AD`.
+- `ChillyRoom.RPC.RPCClient.g__CheckCertHashTrusted|10_2` at RVA `0xA0E5974`.
+
+The patch checks the game package property, actual native x86_64 library
+path, readability/executability and exact **32-byte signatures** of both
+entry points before writing `mov eax, 1; ret`. It is **disabled by
+default** and **fails closed** for any unexpected code signatures. It does
+**not calculate the entire SHA-256 at runtime**, and matching these
+signatures is not a full binary identity check. It leaves `SslUtil`,
+the RPC callback itself and `ForcePatchDownloader` unchanged.
+
+**Warnings:** These checks bypass certificate authenticity validation for
+selected RPC calls. Do not use on your daily device or with important
+accounts. Snapshot the emulator first. A successful patch does not guarantee
+TLS MITM will work, as the user-provided static report includes some
+non-decodable code regions and there may be other validation paths.
+The x86_64 patch has not yet been exercised on the target runtime.
+
+Install LD14.5 through Magisk, reboot the emulator, and verify that
+`module.prop` reports `v1.6.1-ld14.5`. With PCAPdroid MITM and SSL Killer
+**off**, opt into the probe and start the game:
+
+```cmd
+adb shell su -c "setprop persist.il2cppdumper.package com.ChillyRoom.DungeonShooter"
+adb shell su -c "setprop persist.il2cppdumper.tls_probe 1"
+adb shell am force-stop com.ChillyRoom.DungeonShooter
+adb shell am start -n com.ChillyRoom.DungeonShooter/com.chillyroomsdk.sdkbridge.BasePlayerActivity
+adb shell su -c "cat /data/user/0/com.ChillyRoom.DungeonShooter/files/dumper-status.txt"
+```
+
+Look for `TLS_PROBE x86_64: applied two RPCClient trust-check overrides
+(in memory)` with the **new process PID**. If the game does not load,
+disable the experiment and restart it before further testing:
+
+```cmd
+adb shell su -c "setprop persist.il2cppdumper.tls_probe 0"
+adb shell am force-stop com.ChillyRoom.DungeonShooter
+adb shell am start -n com.ChillyRoom.DungeonShooter/com.chillyroomsdk.sdkbridge.BasePlayerActivity
+```
+
+Only when the patch application and normal launch are confirmed, perform a
+**separate controlled** test with PCAPdroid MITM, SSL Killer off. Keep the
+two conditions isolated to distinguish TLS interception effects from
+a runtime-code patch regression. Share redacted logs, not authenticated
+HTTP bodies or tokens.
