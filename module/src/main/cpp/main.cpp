@@ -10,6 +10,7 @@
 #include "zygisk.hpp"
 #include "game.h"
 #include "log.h"
+#include "dumper_trace.h"
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -36,10 +37,13 @@ public:
 
     void postAppSpecialize(const AppSpecializeArgs *) override {
         if (enable_hack) {
+            DumperTrace(game_data_dir, "postAppSpecialize: target matched; native process specialization complete");
             if (!java_vm) {
+                DumperTrace(game_data_dir, "ERROR: no JavaVM; worker cannot start");
                 LOGE("No JavaVM available; skipping dumper");
                 return;
             }
+            DumperTrace(game_data_dir, "starting dumper worker: arm_payload_bytes=%zu", length);
             std::thread hack_thread(
                     hack_prepare, game_data_dir, data, length, java_vm);
             hack_thread.detach();
@@ -89,7 +93,9 @@ private:
                 LOGW("Unable to open arm file");
             }
             if (data == nullptr) {
-                enable_hack = false;
+                // The current game may ship a native x86_64 IL2CPP library.
+                // Missing ARM payload must not disable the direct-ABI dumper.
+                LOGW("ARM worker unavailable; native x86 dumper fallback enabled");
             }
 #endif
         } else {
