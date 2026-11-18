@@ -192,6 +192,140 @@ static void MaybeEnableSoulKnightTlsProbe(void *handle) {
 }
 #endif
 
+// Soul Knight 8.8.0.5 x86_64, native IL2CPP. This is strictly opt-in.
+// The addresses and 32-byte signatures come from the game's 2026-11-18
+// libil2cpp.so (SHA-256 5d6d44d69d62b85984c1fd3f80e81b707ef6efc9152ca8610674820a949d097c).
+// Signatures, package and native-library architecture must all match.
+// Patches only RPCClient's two leaf checks; it intentionally leaves SslUtil,
+// its callbacks and ForcePatchDownloader unchanged.
+#if defined(__x86_64__)
+static int X64MappingProtection(uintptr_t addr) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return -1;
+    char line[1024] = {};
+    int perms = -1;
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long long start = 0, end = 0;
+        char flags[5] = {};
+        if (sscanf(line, "%llx-%llx %4s", &start, &end, flags) != 3) continue;
+        if (addr < start || addr >= end) continue;
+        perms = 0;
+        if (flags[0] == 'r') perms |= PROT_READ;
+        if (flags[1] == 'w') perms |= PROT_WRITE;
+        if (flags[2] == 'x') perms |= PROT_EXEC;
+        break;
+    }
+    fclose(maps);
+    return perms;
+}
+
+static void MaybeEnableSoulKnightX64TlsProbe(void *handle, const char *dir) {
+    char flag[PROP_VALUE_MAX] = {};
+    __system_property_get("persist.il2cppdumper.tls_probe", flag);
+    if (strcmp(flag, "1") != 0) {
+        DumperTrace(dir, "TLS_PROBE x86_64: disabled, flag='%s'", flag);
+        return;
+    }
+
+    char package[PROP_VALUE_MAX] = {};
+    __system_property_get("persist.il2cppdumper.package", package);
+    if (strcmp(package, "com.ChillyRoom.DungeonShooter") != 0) {
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED package property mismatch");
+        return;
+    }
+
+    xdl_info_t info{};
+    if (xdl_info(handle, XDL_DI_DLINFO, &info) != 0 ||
+        !info.dli_fbase || !info.dli_fname ||
+        !strstr(info.dli_fname, "com.ChillyRoom.DungeonShooter") ||
+        !strstr(info.dli_fname, "/lib/x86_64/libil2cpp.so")) {
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED library path/architecture mismatch");
+        return;
+    }
+
+    constexpr uintptr_t errorRva = 0x0a0e56ad;
+    constexpr uintptr_t hashRva  = 0x0a0e5974;
+    static const unsigned char errorSignature[] = {
+        0x55,0x41,0x57,0x41,0x56,0x41,0x55,0x41,
+        0x54,0x53,0x50,0x80,0x3d,0x69,0x8d,0xa1,
+        0x06,0x00,0x48,0x89,0x3c,0x24,0x75,0x2f,
+        0x48,0x8d,0x3d,0x34,0x4f,0x46,0x06,0xe8
+    };
+    static const unsigned char hashSignature[] = {
+        0x55,0x41,0x57,0x41,0x56,0x41,0x55,0x41,
+        0x54,0x53,0x48,0x83,0xec,0x18,0x49,0x89,
+        0xfd,0x80,0x3d,0x9d,0x8a,0xa1,0x06,0x00,
+        0x0f,0x85,0xc7,0x00,0x00,0x00,0x48,0x8d
+    };
+    // System V x86_64: mov eax, 1 ; ret. Bool return is in AL.
+    static const unsigned char returnTrue[] = {0xb8,0x01,0x00,0x00,0x00,0xc3};
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    const uintptr_t error = base + errorRva;
+    const uintptr_t hash = base + hashRva;
+    const long pageSizeLong = sysconf(_SC_PAGESIZE);
+    if (pageSizeLong <= 0 ||
+        (pageSizeLong & (pageSizeLong - 1)) != 0) {
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED invalid page size");
+        return;
+    }
+    const size_t pageSize = static_cast<size_t>(pageSizeLong);
+    const uintptr_t mask = static_cast<uintptr_t>(pageSize - 1);
+    const uintptr_t firstPage = error & ~mask;
+    const uintptr_t secondPage = hash & ~mask;
+    const int firstPerms = X64MappingProtection(error);
+    const int secondPerms = X64MappingProtection(hash);
+
+    if ((firstPerms & (PROT_READ | PROT_EXEC)) != (PROT_READ | PROT_EXEC) ||
+        (secondPerms & (PROT_READ | PROT_EXEC)) != (PROT_READ | PROT_EXEC) ||
+        (firstPage == secondPage && firstPerms != secondPerms) ||
+        (error & mask) + sizeof(errorSignature) > pageSize ||
+        (hash & mask) + sizeof(hashSignature) > pageSize) {
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED memory mapping validation");
+        return;
+    }
+    if (memcmp(reinterpret_cast<const void *>(error), errorSignature,
+               sizeof(errorSignature)) != 0 ||
+        memcmp(reinterpret_cast<const void *>(hash), hashSignature,
+               sizeof(hashSignature)) != 0) {
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED build signature mismatch, no changes");
+        return;
+    }
+    DumperTrace(dir, "TLS_PROBE x86_64: 8.8.0.5 signatures verified; applying opt-in patch");
+
+    if (mprotect(reinterpret_cast<void *>(firstPage), pageSize,
+                 PROT_READ | PROT_WRITE) != 0) {
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED first mprotect errno=%d", errno);
+        return;
+    }
+    if (secondPage != firstPage &&
+        mprotect(reinterpret_cast<void *>(secondPage), pageSize,
+                 PROT_READ | PROT_WRITE) != 0) {
+        const int savedErrno = errno;
+        mprotect(reinterpret_cast<void *>(firstPage), pageSize, firstPerms);
+        DumperTrace(dir, "TLS_PROBE x86_64: BLOCKED second mprotect errno=%d", savedErrno);
+        return;
+    }
+
+    memcpy(reinterpret_cast<void *>(error), returnTrue, sizeof(returnTrue));
+    memcpy(reinterpret_cast<void *>(hash), returnTrue, sizeof(returnTrue));
+    __builtin___clear_cache(reinterpret_cast<char *>(error),
+                            reinterpret_cast<char *>(error + sizeof(returnTrue)));
+    __builtin___clear_cache(reinterpret_cast<char *>(hash),
+                            reinterpret_cast<char *>(hash + sizeof(returnTrue)));
+
+    const int restoreFirst = mprotect(reinterpret_cast<void *>(firstPage),
+                                      pageSize, firstPerms);
+    const int restoreSecond = (secondPage == firstPage) ? restoreFirst :
+        mprotect(reinterpret_cast<void *>(secondPage), pageSize, secondPerms);
+    if (restoreFirst != 0 || restoreSecond != 0) {
+        DumperTrace(dir, "TLS_PROBE x86_64: WARNING code updated but page permissions not fully restored");
+        return;
+    }
+    DumperTrace(dir, "TLS_PROBE x86_64: applied two RPCClient trust-check overrides (in memory)");
+}
+#endif
+
 void hack_start(const char *game_data_dir) {
 #if defined(__x86_64__)
     DumperTrace(game_data_dir, "hack_start entered (x86_64 native worker)");
@@ -229,6 +363,8 @@ void hack_start(const char *game_data_dir) {
 #if defined(__aarch64__)
             TlsProbeStatus("libil2cpp.so found");
             MaybeEnableSoulKnightTlsProbe(handle);
+#elif defined(__x86_64__)
+            MaybeEnableSoulKnightX64TlsProbe(handle, game_data_dir);
 #endif
             DumperTrace(game_data_dir, "il2cpp_api_init starting");
             il2cpp_api_init(handle);
