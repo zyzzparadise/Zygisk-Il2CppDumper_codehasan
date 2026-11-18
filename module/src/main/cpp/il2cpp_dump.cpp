@@ -18,6 +18,7 @@
 #include <csignal>
 #include "xdl.h"
 #include "log.h"
+#include "dumper_trace.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
 
@@ -499,26 +500,37 @@ static void remove_dump_guard() {
 
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
+    DumperTrace(outDir, "il2cpp_dump entered");
     // Bail if the essential walk APIs are missing, rather than null-calling.
     if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies ||
         !il2cpp_assembly_get_image || !il2cpp_image_get_name) {
+        DumperTrace(outDir, "ERROR: essential IL2CPP API missing (domain=%d assemblies=%d image=%d name=%d)",
+                    il2cpp_domain_get != nullptr,
+                    il2cpp_domain_get_assemblies != nullptr,
+                    il2cpp_assembly_get_image != nullptr,
+                    il2cpp_image_get_name != nullptr);
         LOGE("essential il2cpp api missing; cannot dump");
         return;
     }
     size_t size = 0;
     auto domain = il2cpp_domain_get();
     if (!domain) {
+        DumperTrace(outDir, "ERROR: il2cpp_domain_get returned null");
         LOGE("il2cpp_domain_get returned null; cannot dump");
         return;
     }
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
     if (!assemblies || size == 0) {
+        DumperTrace(outDir, "ERROR: no assemblies (pointer=%p size=%zu)", (void *) assemblies, size);
         LOGE("no assemblies (assemblies=%p size=%zu); cannot dump", (void *) assemblies, size);
         return;
     }
+    DumperTrace(outDir, "IL2CPP assemblies found: %zu; image_get_class=%s", size,
+                il2cpp_image_get_class ? "yes" : "no");
     auto outPath = std::string(outDir).append("/files/dump.cs");
     std::ofstream outStream(outPath);
     if (!outStream) {
+        DumperTrace(outDir, "ERROR: failed to open dump.cs");
         LOGE("failed to open dump file: %s", outPath.data());
         return;
     }
@@ -607,5 +619,6 @@ void il2cpp_dump(const char *outDir) {
     }
     LOGI("write dump file");
     outStream.close();
+    DumperTrace(outDir, "dump finished, output=%s", outPath.c_str());
     LOGI("dump done!");
 }
